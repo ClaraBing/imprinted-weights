@@ -1,13 +1,20 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
+import pdb
+
+from basemodel.model import models as basemodels
 
 class Net(nn.Module):
-    def __init__(self, num_classes=100, norm=True, scale=True):
+    def __init__(self, num_classes=100, norm=True, scale=True, options=None):
         super(Net,self).__init__()
-        self.extractor = Extractor()
-        self.embedding = Embedding()
-        self.classifier = Classifier(num_classes)
+        self.extractor = Extractor(options)
+        self.embedding = Embedding(options)
+        if options is None:
+          self.classifier = Classifier(num_classes)
+        else:
+          self.classifier = Classifier(options['num_classes'])
+        self.options = options
         self.s = nn.Parameter(torch.FloatTensor([10]))
         self.norm = norm
         self.scale = scale
@@ -47,20 +54,33 @@ class Net(nn.Module):
         self.classifier.fc.weight.data = w.div(norm.expand_as(w))
 
 class Extractor(nn.Module):
-    def __init__(self):
+    def __init__(self, options=None):
         super(Extractor,self).__init__()
-        basenet = models.resnet50(pretrained=True)
-        self.extractor = nn.Sequential(*list(basenet.children())[:-1])
+        if options is None:
+          basenet = models.resnet50(pretrained=True)
+          self.extractor = nn.Sequential(*list(basenet.children())[:-1])
+        else:
+          # pdb.set_trace()
+          basenet = basemodels.__dict__[options['arch']](num_classes=options['num_classes'], size_fm_2nd_head=28, options=options)
+          self.extractor = basenet
+
 
     def forward(self, x):
-        x = self.extractor(x)
+        # x = self.extractor(x)
+        
+        # only takes star_representation
+        _, _, _, x = self.extractor(x)
         x = x.view(x.size(0), -1)
         return x
 
 class Embedding(nn.Module):
-    def __init__(self):
+    def __init__(self, options=None):
         super(Embedding,self).__init__()
-        self.fc = nn.Linear(2048, 256)
+
+        if options is None:
+          self.fc = nn.Linear(2048, 256)
+        else:
+          self.fc = nn.Linear(options['D_star_embed'], 256)
 
     def forward(self, x):
         x = self.fc(x)

@@ -2,6 +2,8 @@ import argparse
 import os
 import shutil
 import time
+import pickle
+import pdb
 
 import torch
 import torch.nn as nn
@@ -11,10 +13,16 @@ import torch.distributed as dist
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
+
+# self-defined libs: imprinted
 import models
 import loader
-
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
+
+# self-defined libs: basemodel
+# EPIC loader
+from basemodel.utils.other import *
+
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--data', metavar='DIR', default='CUB_200_2011',
@@ -39,6 +47,11 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
+# options added for EPIC
+parser.add_argument('--dataset', default='EPIC',
+                    help='dataset name')
+parser.add_argument('--foptions', default='/vision2/u/bingbin/ORN/ckpt/epic_headscontext+object+star_gcnObj0_gcnCtxt0_bt2_lr5e-05_wd1e-05_star_v2_visPrior_correctBBox/options.pkl',
+                    help='Path to an option file from a previous ckpt.')
 
 best_prec1 = 0
 
@@ -50,7 +63,17 @@ def main():
     if not os.path.isdir(args.checkpoint):
         mkdir_p(args.checkpoint)
 
-    model = models.Net().cuda()
+    print('dataset:', args.dataset)
+    if args.dataset == 'EPIC':
+      with open(args.foptions, 'rb') as handle:
+        options = pickle.load(handle)
+        if options['root'][0] == '.':
+          # update relative path
+          options['root'] = 'basemodel' + options['root'][1:]
+    else:
+      options = None
+
+    model = models.Net(options=options).cuda()
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
@@ -64,7 +87,9 @@ def main():
             ], lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
     # optionally resume from a checkpoint
-    title = 'CUB'
+    # title = 'CUB'
+    title = args.dataset
+
     if args.resume:
         print('==> Resuming from checkpoint..')
         assert os.path.isfile(args.resume), 'Error: no checkpoint directory found!'
@@ -87,28 +112,32 @@ def main():
     normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5],
                                      std=[0.5, 0.5, 0.5])
 
-    train_dataset = loader.ImageLoader(
-        args.data,
-        transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]), train=True)
+    if args.dataset == 'CUB':
+      train_dataset = loader.ImageLoader(
+          args.data,
+          transforms.Compose([
+              transforms.RandomResizedCrop(224),
+              transforms.RandomHorizontalFlip(),
+              transforms.ToTensor(),
+              normalize,
+          ]), train=True)
+  
+      train_loader = torch.utils.data.DataLoader(
+          train_dataset, batch_size=args.batch_size, shuffle=True,
+          num_workers=args.workers, pin_memory=True)
+  
+      val_loader = torch.utils.data.DataLoader(
+          loader.ImageLoader(args.data, transforms.Compose([
+              transforms.Resize(256),
+              transforms.CenterCrop(224),
+              transforms.ToTensor(),
+              normalize,
+          ])),
+          batch_size=args.batch_size, shuffle=False,
+          num_workers=args.workers, pin_memory=True)
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
-
-    val_loader = torch.utils.data.DataLoader(
-        loader.ImageLoader(args.data, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+    elif args.dataset == 'EPIC':
+      train_dataset, val_dataset, train_loader, val_loader = get_datasets_and_dataloaders(options, device=options['device'])
 
     if args.evaluate:
         validate(val_loader, model, criterion)
@@ -157,12 +186,31 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
     end = time.time()
     bar = Bar('Training', max=len(train_loader))
-    for batch_idx, (input, target) in enumerate(train_loader):
+
+    for batch_idx, input_var in enumerate(train_loader):
+        # pdb.set_trace()
+
+        if type(input_var) == tuple and len(input_var) == 2:
+          input, target = input_var
+        elif type(input_var) == dict:
+          input = input_var
+          target = input_var['target']
+          if target.dim() == 2:
+            # prepare format for CrossEntropy
+            target = target.nonzero()[:, 1]
+        else:
+          raise ValueError('Unknown type: type(input_var)=={}'.format(type(input_var)))
+
         # measure data loading time
         data_time.update(time.time() - end)
 
-        input = input.cuda()
-        target = target.cuda(non_blocking=True)
+        if type(input) == dict:
+          for key in input:
+            input[key] = input[key].cuda()
+        else:
+          input = input.cuda()
+        # target = target.cuda(non_blocking=True)
+        target = target.cuda()
 
         # compute output
         output = model(input)
@@ -170,9 +218,10 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
-        top5.update(prec5.item(), input.size(0))
+
+        losses.update(loss.item(), target.size(0))
+        top1.update(prec1.item(), target.size(0))
+        top5.update(prec5.item(), target.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
