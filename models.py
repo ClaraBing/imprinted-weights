@@ -56,6 +56,7 @@ class Net(nn.Module):
 class Extractor(nn.Module):
     def __init__(self, options=None):
         super(Extractor,self).__init__()
+        self.options = options
         if options is None:
           basenet = models.resnet50(pretrained=True)
           self.extractor = nn.Sequential(*list(basenet.children())[:-1])
@@ -66,10 +67,11 @@ class Extractor(nn.Module):
 
 
     def forward(self, x):
-        # x = self.extractor(x)
-        
-        # only takes star_representation
-        _, _, _, x = self.extractor(x)
+        if self.options is None:
+          x = self.extractor(x)
+        else:
+          # only takes star_representation (ret from two_heads -> forward)
+          _, _, _, x = self.extractor(x)
         x = x.view(x.size(0), -1)
         return x
 

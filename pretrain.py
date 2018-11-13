@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
+cudnn.benchmark = False
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data
@@ -50,7 +51,8 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
 # options added for EPIC
 parser.add_argument('--dataset', default='EPIC',
                     help='dataset name')
-parser.add_argument('--foptions', default='/vision2/u/bingbin/ORN/ckpt/epic_headscontext+object+star_gcnObj0_gcnCtxt0_bt2_lr5e-05_wd1e-05_star_v2_visPrior_correctBBox/options.pkl',
+# parser.add_argument('--foptions', default='/vision2/u/bingbin/ORN/ckpt/epic_headscontext+object+star_gcnObj0_gcnCtxt0_bt2_lr5e-05_wd1e-05_star_v2_visPrior_correctBBox/options.pkl',
+parser.add_argument('--foptions', default='/vision2/u/bingbin/ORN/ckpt/epic_headscontext+object+star_gcnObjNone_gcnCtxtNone_bt4_lr1e-04_wd3e-06_tuneConv3D_adjWNorm_freezeORN_maxObj/options.pkl',
                     help='Path to an option file from a previous ckpt.')
 
 best_prec1 = 0
@@ -70,6 +72,7 @@ def main():
         if options['root'][0] == '.':
           # update relative path
           options['root'] = 'basemodel' + options['root'][1:]
+        options['num_crops'] = 1
     else:
       options = None
 
@@ -113,6 +116,7 @@ def main():
                                      std=[0.5, 0.5, 0.5])
 
     if args.dataset == 'CUB':
+      print('Using dataset CUB')
       train_dataset = loader.ImageLoader(
           args.data,
           transforms.Compose([
@@ -137,11 +141,17 @@ def main():
           num_workers=args.workers, pin_memory=True)
 
     elif args.dataset == 'EPIC':
+      print('Using dataset EPIC')
       train_dataset, val_dataset, train_loader, val_loader = get_datasets_and_dataloaders(options, device=options['device'])
 
     if args.evaluate:
         validate(val_loader, model, criterion)
         return
+
+    print('# train_loader:', len(train_loader))
+    print('# val_loader:', len(val_loader))
+
+    print('Training epoch from {} to {}'.format(args.start_epoch, args.epochs))
 
     for epoch in range(args.start_epoch, args.epochs):
         scheduler.step()
@@ -187,65 +197,67 @@ def train(train_loader, model, criterion, optimizer, epoch):
     end = time.time()
     bar = Bar('Training', max=len(train_loader))
 
-    for batch_idx, input_var in enumerate(train_loader):
-        # pdb.set_trace()
-
-        if type(input_var) == tuple and len(input_var) == 2:
-          input, target = input_var
-        elif type(input_var) == dict:
-          input = input_var
-          target = input_var['target']
-          if target.dim() == 2:
-            # prepare format for CrossEntropy
-            target = target.nonzero()[:, 1]
-        else:
-          raise ValueError('Unknown type: type(input_var)=={}'.format(type(input_var)))
-
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        if type(input) == dict:
-          for key in input:
-            input[key] = input[key].cuda()
-        else:
-          input = input.cuda()
-        # target = target.cuda(non_blocking=True)
-        target = target.cuda()
-
-        # compute output
-        output = model(input)
-        loss = criterion(output, target)
-
-        # measure accuracy and record loss
-        prec1, prec5 = accuracy(output, target, topk=(1, 5))
-
-        losses.update(loss.item(), target.size(0))
-        top1.update(prec1.item(), target.size(0))
-        top5.update(prec5.item(), target.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        model.weight_norm()
-        # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
-                    batch=batch_idx + 1,
-                    size=len(train_loader),
-                    data=data_time.val,
-                    bt=batch_time.val,
-                    total=bar.elapsed_td,
-                    eta=bar.eta_td,
-                    loss=losses.avg,
-                    top1=top1.avg,
-                    top5=top5.avg,
-                    )
-        bar.next()
+    try:
+      for batch_idx, input_var in enumerate(train_loader):
+  
+          if (type(input_var)==tuple or type(input_var)==list) and len(input_var) == 2:
+            input, target = input_var
+          elif type(input_var) == dict:
+            input = input_var
+            target = input_var['target']
+            if target.dim() == 2:
+              # prepare format for CrossEntropy
+              target = target.nonzero()[:, 1]
+          else:
+            raise ValueError('Unknown type: type(input_var)=={}'.format(type(input_var)))
+  
+          # measure data loading time
+          data_time.update(time.time() - end)
+  
+          if type(input) == dict:
+            for key in input:
+              input[key] = input[key].contiguous().cuda()
+          else:
+            input = input.cuda()
+          target = target.cuda()
+  
+          # compute output
+          output = model(input)
+          loss = criterion(output, target)
+  
+          # measure accuracy and record loss
+          prec1, prec5 = accuracy(output, target, topk=(1, 5))
+  
+          losses.update(loss.item(), target.size(0))
+          top1.update(prec1.item(), target.size(0))
+          top5.update(prec5.item(), target.size(0))
+  
+          # compute gradient and do SGD step
+          optimizer.zero_grad()
+          loss.backward()
+          optimizer.step()
+  
+          # measure elapsed time
+          batch_time.update(time.time() - end)
+          end = time.time()
+  
+          model.weight_norm()
+          # plot progress
+          bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                      batch=batch_idx + 1,
+                      size=len(train_loader),
+                      data=data_time.val,
+                      bt=batch_time.val,
+                      total=bar.elapsed_td,
+                      eta=bar.eta_td,
+                      loss=losses.avg,
+                      top1=top1.avg,
+                      top5=top5.avg,
+                      )
+          bar.next()
+    except Exception as e:
+      bar.finish()
+      raise e
     bar.finish()
     return (losses.avg, top1.avg)
 
@@ -260,43 +272,68 @@ def validate(val_loader, model, criterion):
     # switch to evaluate mode
     model.eval()
     bar = Bar('Testing ', max=len(val_loader))
-    with torch.no_grad():
-        end = time.time()
-        for batch_idx, (input, target) in enumerate(val_loader):
-            # measure data loading time
-            data_time.update(time.time() - end)
+    try:
+      with torch.no_grad():
+          end = time.time()
+          for batch_idx, input_var in enumerate(val_loader):
+              if (type(input_var) == tuple or type(input_var) == list) and len(input_var) == 2:
+                input, target = input_var
+              elif type(input_var) == dict:
+                input = input_var
+                target = input_var['target']
+                if target.dim() == 2:
+                  # prepare format for CrossEntropy
+                  target = target.nonzero()[:, 1]
+              else:
+                raise ValueError('Unknown type: type(input_var)=={}'.format(type(input_var)))
 
-            input = input.cuda()
-            target = target.cuda(non_blocking=True)
+              # measure data loading time
+              data_time.update(time.time() - end)
 
-            # compute output
-            output = model(input)
-            loss = criterion(output, target)
+              if type(input) == dict:
+                for key in input:
+                  try:
+                    input[key] = input[key].cuda()
+                  except Exception as e:
+                    print('key:', key)
+                    print(e)
+                    pdb.set_trace()
+              else:
+                input = input.cuda()
+              target = target.cuda()
 
-            # measure accuracy and record loss
-            prec1, prec5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(), input.size(0))
-            top1.update(prec1.item(), input.size(0))
-            top5.update(prec5.item(), input.size(0))
+              # compute output
+              output = model(input)
+              loss = criterion(output, target)
 
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
+              # measure accuracy and record loss
+              prec1, prec5 = accuracy(output, target, topk=(1, 5))
+              losses.update(loss.item(), target.size(0))
+              top1.update(prec1.item(), target.size(0))
+              top5.update(prec5.item(), target.size(0))
 
-             # plot progress
-            bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
-                        batch=batch_idx + 1,
-                        size=len(val_loader),
-                        data=data_time.avg,
-                        bt=batch_time.avg,
-                        total=bar.elapsed_td,
-                        eta=bar.eta_td,
-                        loss=losses.avg,
-                        top1=top1.avg,
-                        top5=top5.avg,
-                        )
-            bar.next()
-        bar.finish()
+              # measure elapsed time
+              batch_time.update(time.time() - end)
+              end = time.time()
+
+              # plot progress
+              bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                          batch=batch_idx + 1,
+                          size=len(val_loader),
+                          data=data_time.avg,
+                          bt=batch_time.avg,
+                          total=bar.elapsed_td,
+                          eta=bar.eta_td,
+                          loss=losses.avg,
+                          top1=top1.avg,
+                          top5=top5.avg,
+                          )
+              bar.next()
+          bar.finish()
+    except Exception as e:
+      bar.finish()
+      raise e
+
     return (losses.avg, top1.avg)
 
 
